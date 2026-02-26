@@ -1,6 +1,18 @@
 import "dotenv/config";
 import express from "express";
 
+const seen = new Map();
+const TTL = 10 * 60 * 1000;
+
+function isDup(versionId) {
+  const now = Date.now();
+  for (const [k, t] of seen) if (now - t > TTL) seen.delete(k);
+  if (!versionId) return false;
+  if (seen.has(versionId)) return true;
+  seen.set(versionId, now);
+  return false;
+}
+
 const app = express();
 app.use(express.json({ type: "*/*" }));
 
@@ -43,36 +55,18 @@ app.post("/figma/webhook", async (req, res) => {
     const fileName = req.body?.file_name || "Unknown file";
     const fileKey = req.body?.file_key || "";
     const versionId = req.body?.version_id || req.body?.version?.id || "";
+    if (isDup(versionId)) {
+      console.log("dup skip:", versionId);
+      return; // ✅ Slack 보내는 것만 스킵
+    }
     const triggeredBy =
       req.body?.triggered_by?.handle ||
       req.body?.triggered_by?.name ||
       req.body?.triggered_by?.id ||
       "someone";
     
-      // (추가) 버전 히스토리에서 Title/Description 가져오기
-    let versionLabel = "";
-    let versionDesc = "";
-
-    if (fileKey && versionId) {
-      try {
-        const vr = await fetch(`https://api.figma.com/v1/files/${fileKey}/versions`, {
-          headers: { "X-Figma-Token": FIGMA_TOKEN }
-        });
-
-        if (vr.ok) {
-          const data = await vr.json();
-          const hit = (data?.versions || []).find(v => String(v.id) === String(versionId));
-          versionLabel = hit?.label || "";
-          versionDesc = hit?.description || "";
-        } else {
-          const body = await vr.text().catch(() => "");
-          console.warn("Figma versions fetch failed:", vr.status, body);
-        }
-      } catch (e) {
-        console.warn("Figma versions fetch error:", e);
-      }
-    }
-      
+    const versionLabel = (req.body?.label || "").trim();
+    const versionDesc  = (req.body?.description || "").trim();  
 
 
     const figmaFileUrl = fileKey ? `https://www.figma.com/file/${fileKey}` : "https://www.figma.com/";
@@ -81,10 +75,9 @@ app.post("/figma/webhook", async (req, res) => {
 
     const text =
       `📌 *Figma 버전 업데이트* 📌\n` +
-      `• 파일: *${fileName}*\n` +
-      `• build: ${BUILD_MARK}\n` +
-      (versionLabel ? `• ⬆️ 버전: ${versionLabel}\n` : "") +         // ✅ 네가 Title에 적는 v12
-      (versionDesc ? `• ❇️ 변경점: ${versionDesc}\n` : "") +          // (원하면 유지)
+      `• 파일: ${fileName}\n` +
+      (versionLabel ? `• 버전: ${versionLabel}\n` : "") +
+      (versionDesc ? `• 변경점: ${versionDesc}\n` : "") +
       `• 작성자: ${triggeredBy}\n` +
       `• 링크: ${figmaFileUrl}`;
 
