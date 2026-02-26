@@ -7,6 +7,7 @@ app.use(express.json({ type: "*/*" }));
 const PORT = process.env.PORT || 3000;
 const PASSCODE = process.env.FIGMA_WEBHOOK_PASSCODE;
 const SLACK_WEBHOOK_URL = process.env.SLACK_WEBHOOK_URL;
+const FIGMA_TOKEN = process.env.FIGMA_TOKEN;
 
 function must(value, name) {
   if (!value) throw new Error(`Missing env: ${name}`);
@@ -21,6 +22,7 @@ app.post("/figma/webhook", async (req, res) => {
   try {
     must(PASSCODE, "FIGMA_WEBHOOK_PASSCODE");
     must(SLACK_WEBHOOK_URL, "SLACK_WEBHOOK_URL");
+    must(FIGMA_TOKEN, "FIGMA_TOKEN");
 
     // 1) Figma passcode 검증
     const incomingPasscode = req.body?.passcode;
@@ -46,13 +48,43 @@ app.post("/figma/webhook", async (req, res) => {
       req.body?.triggered_by?.name ||
       req.body?.triggered_by?.id ||
       "someone";
+    
+      // (추가) 버전 히스토리에서 Title/Description 가져오기
+    let versionLabel = "";
+    let versionDesc = "";
+
+    if (fileKey && versionId) {
+      try {
+        const vr = await fetch(`https://api.figma.com/v1/files/${fileKey}/versions`, {
+          headers: { "X-Figma-Token": FIGMA_TOKEN }
+        });
+
+        if (vr.ok) {
+          const data = await vr.json();
+          const hit = (data?.versions || []).find(v => String(v.id) === String(versionId));
+          versionLabel = hit?.label || "";
+          versionDesc = hit?.description || "";
+        } else {
+          const body = await vr.text().catch(() => "");
+          console.warn("Figma versions fetch failed:", vr.status, body);
+        }
+      } catch (e) {
+        console.warn("Figma versions fetch error:", e);
+      }
+    }
+      
+
 
     const figmaFileUrl = fileKey ? `https://www.figma.com/file/${fileKey}` : "https://www.figma.com/";
 
+    const BUILD_MARK = "BUILD_2026-02-25_16:40";
+
     const text =
-      `📌 *Figma 버전 업데이트*\n` +
+      `📌 *Figma 버전 업데이트* 📌\n` +
       `• 파일: *${fileName}*\n` +
-      (versionId ? `• 버전ID: \`${versionId}\`\n` : "") +
+      `• build: ${BUILD_MARK}\n` +
+      (versionLabel ? `• ⬆️ 버전: ${versionLabel}\n` : "") +         // ✅ 네가 Title에 적는 v12
+      (versionDesc ? `• ❇️ 변경점: ${versionDesc}\n` : "") +          // (원하면 유지)
       `• 작성자: ${triggeredBy}\n` +
       `• 링크: ${figmaFileUrl}`;
 
