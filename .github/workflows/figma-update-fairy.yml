@@ -116,7 +116,7 @@ jobs:
           echo "changed_count=$count" >> $GITHUB_ENV
 
       - name: Post to Slack (Incoming Webhook)
-        if: ${{ env.changed_count != '0' && secrets.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ env.changed_count != '0' }}
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
