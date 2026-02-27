@@ -137,7 +137,7 @@ jobs:
             lines=$(echo "$head" | jq -r '
               .[] |
               (
-                "- 파일 : " + (.file_name // "-") + "\n" +
+                "  - 파일 : " + (.file_name // "-") + "\n" +
                 "  - 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
                 "  - 내용 : " +
                   (if ((.description // "")|length) > 0 then
@@ -154,7 +154,9 @@ jobs:
               lines="$lines\n\n…외 ${rest}건 더 있음"
             fi
             
-            text="🧚‍♀️ *Figma 팀 업데이트 감지* (새 버전 ${total}건)\n\n$lines"
+            text="🧚‍♀️ *Figma 팀 업데이트 감지* (새 버전 ${total}건)
+            
+            $lines"
             
             curl -sS -X POST -H 'Content-type: application/json' \
               --data "$(jq -n --arg t "$text" '{text:$t}')" \
