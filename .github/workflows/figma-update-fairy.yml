@@ -1,0 +1,103 @@
+name: Figma Update Fairy
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # 5분마다 (UTC 기준이지만 5분 주기는 상관없음)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # last_version 저장 커밋하려면 필요
+
+jobs:
+  check-and-post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Check latest Figma version
+        env:
+          FIGMA_TOKEN: ${{ secrets.FIGMA_TOKEN }}
+          FIGMA_FILE_KEY: ${{ secrets.FIGMA_FILE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p state
+          LAST_FILE="state/last_version.txt"
+          touch "$LAST_FILE"
+
+          # 최신 버전 1개만 조회
+          RESP=$(curl -sS -H "X-FIGMA-TOKEN: $FIGMA_TOKEN" \
+            "https://api.figma.com/v1/files/$FIGMA_FILE_KEY/versions?page_size=1")
+
+          LATEST_ID=$(echo "$RESP" | jq -r '.versions[0].id // empty')
+          LATEST_LABEL=$(echo "$RESP" | jq -r '.versions[0].label // ""')
+          LATEST_CREATED=$(echo "$RESP" | jq -r '.versions[0].created_at // ""')
+          LATEST_USER=$(echo "$RESP" | jq -r '.versions[0].user.handle // .versions[0].user.email // ""')
+
+          if [ -z "$LATEST_ID" ]; then
+            echo "❌ 최신 버전 ID를 못 가져왔음. 토큰/권한/파일키 확인 필요."
+            echo "$RESP"
+            exit 1
+          fi
+
+          PREV_ID=$(cat "$LAST_FILE" | tr -d '\n' || true)
+
+          echo "prev=$PREV_ID"
+          echo "latest=$LATEST_ID"
+
+          if [ "$LATEST_ID" = "$PREV_ID" ]; then
+            echo "변경 없음"
+            echo "changed=false" >> $GITHUB_ENV
+          else
+            echo "$LATEST_ID" > "$LAST_FILE"
+            echo "changed=true" >> $GITHUB_ENV
+            echo "latest_id=$LATEST_ID" >> $GITHUB_ENV
+            echo "latest_label=$LATEST_LABEL" >> $GITHUB_ENV
+            echo "latest_created=$LATEST_CREATED" >> $GITHUB_ENV
+            echo "latest_user=$LATEST_USER" >> $GITHUB_ENV
+          fi
+
+      # 옵션 A: Incoming Webhook으로 전송 (가장 쉬움)
+      - name: Post to Slack (Incoming Webhook)
+        if: env.changed == 'true' && secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          FIGMA_FILE_KEY: ${{ secrets.FIGMA_FILE_KEY }}
+        run: |
+          set -euo pipefail
+          LINK="https://www.figma.com/file/$FIGMA_FILE_KEY?version-id=${{ env.latest_id }}"
+          TEXT="🧚‍♀️ *Figma 업데이트 감지*\n• 버전: `${{ env.latest_label }}`\n• 작성자: `${{ env.latest_user }}`\n• 시간: `${{ env.latest_created }}`\n• 링크: $LINK"
+          curl -sS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"$TEXT\"}" \
+            "$SLACK_WEBHOOK_URL"
+
+      # 옵션 B: Slack Bot Token으로 전송 (채널 바꾸기 쉬움)
+      - name: Post to Slack (Bot API)
+        if: env.changed == 'true' && secrets.SLACK_BOT_TOKEN != '' && secrets.SLACK_CHANNEL_ID != ''
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          FIGMA_FILE_KEY: ${{ secrets.FIGMA_FILE_KEY }}
+        run: |
+          set -euo pipefail
+          LINK="https://www.figma.com/file/$FIGMA_FILE_KEY?version-id=${{ env.latest_id }}"
+          TEXT="🧚‍♀️ *Figma 업데이트 감지*\n• 버전: `${{ env.latest_label }}`\n• 작성자: `${{ env.latest_user }}`\n• 시간: `${{ env.latest_created }}`\n• 링크: $LINK"
+
+          curl -sS -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "{\"channel\":\"$SLACK_CHANNEL_ID\",\"text\":\"$TEXT\"}" | jq .
+
+      - name: Commit state file
+        if: env.changed == 'true'
+        run: |
+          git config user.name "figma-update-fairy"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/last_version.txt
+          git commit -m "chore: update last seen figma version" || exit 0
+          git push
