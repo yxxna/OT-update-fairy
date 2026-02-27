@@ -77,7 +77,7 @@ jobs:
               fi
 
               new_versions=$(echo "$versions" | jq -c --arg prev "$prev_id" '
-                reduce .versions[] as $v ({hit:false; out:[]};
+                reduce .versions[] as $v ({hit:false, out:[]};
                   if .hit then .
                   elif ($v.id == $prev) then .hit=true
                   else .out += [{
