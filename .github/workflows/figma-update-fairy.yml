@@ -80,26 +80,36 @@ jobs:
                 reduce .versions[] as $v ({hit:false, out:[]};
                   if .hit then .
                   elif ($v.id == $prev) then .hit=true
-                  else .out += [{
-                    id: $v.id,
-                      label: ($v.label // ""),
-                      description: ($v.description // ""),
-                      created_at: ($v.created_at // ""),
-                      user: ($v.user.handle // $v.user.email // "")
-                  }]
+                  else
+                    # ✅ label/description 있는 버전만 알림 대상으로 수집
+                    if ((($v.label // "")|length > 0) or (($v.description // "")|length > 0)) then
+                      .out += [{
+                        id: $v.id,
+                        label: ($v.label // ""),
+                        description: ($v.description // ""),
+                        created_at: ($v.created_at // ""),
+                        user: ($v.user.handle // $v.user.email // "")
+                      }]
+                    else
+                      .
+                    end
                   end
                 ) | .out
               ')
 
               new_count=$(echo "$new_versions" | jq 'length')
 
-              if [ "$new_count" -gt 0 ]; then
+              # ✅ 최신 버전 id는 항상 저장 (알림 대상이 없어도 저장해야 반복 알림이 안 남)
+              if [ "$latest_id" != "$prev_id" ]; then
                 tmp=$(mktemp)
                 jq --arg k "$key" --arg v "$latest_id" '. + {($k): $v}' "$STATE_FILE" > "$tmp"
                 mv "$tmp" "$STATE_FILE"
-
+              fi
+              
+              # ✅ 알림은 "라벨/내용 있는 버전"이 있을 때만 changes에 추가
+              if [ "$new_count" -gt 0 ]; then
                 link_base="https://www.figma.com/file/$key"
-
+              
                 tmp2=$(mktemp)
                 jq --arg file_name "$name" \
                    --arg file_key "$key" \
