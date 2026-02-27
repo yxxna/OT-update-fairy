@@ -82,9 +82,10 @@ jobs:
                   elif ($v.id == $prev) then .hit=true
                   else .out += [{
                     id: $v.id,
-                    label: ($v.label // ""),
-                    created_at: ($v.created_at // ""),
-                    user: ($v.user.handle // $v.user.email // "")
+                      label: ($v.label // ""),
+                      description: ($v.description // ""),
+                      created_at: ($v.created_at // ""),
+                      user: ($v.user.handle // $v.user.email // "")
                   }]
                   end
                 ) | .out
@@ -124,28 +125,40 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          set -euo pipefail
-
-          total=$(jq 'length' state/changes.json)
-
-          SHOW=12
-          head=$(jq -c --argjson n $SHOW '.[0:$n]' state/changes.json)
-          rest=$(( total - SHOW ))
-          if [ $rest -lt 0 ]; then rest=0; fi
-
-          lines=$(echo "$head" | jq -r '
-            .[] | "• \(.file_name) | \(.user) | \(.created_at)\n  \(.link)"
-          ')
-
-          if [ $rest -gt 0 ]; then
-            lines="$lines\n…외 ${rest}건 더 있음"
-          fi
-
-          text="🧚‍♀️ *Figma 팀 업데이트 감지* (새 버전 ${total}건)\n$lines"
-
-          curl -sS -X POST -H 'Content-type: application/json' \
-            --data "$(jq -n --arg t "$text" '{text:$t}')" \
-            "$SLACK_WEBHOOK_URL"
+            set -euo pipefail
+            total=$(jq 'length' state/changes.json)
+            
+            # 너무 길면 Slack이 보기 싫어하니까 상위 10개까지만 보여줌
+            SHOW=10
+            head=$(jq -c --argjson n $SHOW '.[0:$n]' state/changes.json)
+            rest=$(( total - SHOW ))
+            if [ $rest -lt 0 ]; then rest=0; fi
+            
+            lines=$(echo "$head" | jq -r '
+              .[] |
+              (
+                "- 파일 : " + (.file_name // "-") + "\n" +
+                "  - 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
+                "  - 내용 : " +
+                  (if ((.description // "")|length) > 0 then
+                     ("\n" + ((.description // "") | gsub("\r\n";"\n") | split("\n") | map("    " + .) | join("\n")))
+                   else
+                     "-"
+                   end) + "\n" +
+                "  - 작성자 : " + (.user // "-") + "\n" +
+                "  - 링크 : " + (.link // "-")
+              )
+            ')
+            
+            if [ $rest -gt 0 ]; then
+              lines="$lines\n\n…외 ${rest}건 더 있음"
+            fi
+            
+            text="🧚‍♀️ *Figma 팀 업데이트 감지* (새 버전 ${total}건)\n\n$lines"
+            
+            curl -sS -X POST -H 'Content-type: application/json' \
+              --data "$(jq -n --arg t "$text" '{text:$t}')" \
+              "$SLACK_WEBHOOK_URL"
 
       - name: Commit state
         run: |
