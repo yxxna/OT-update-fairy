@@ -7,6 +7,10 @@ on:
 
 permissions:
   contents: write
+  
+concurrency:
+  group: figma-update-fairy-state
+  cancel-in-progress: false
 
 jobs:
   scan-team-and-post:
@@ -145,8 +149,20 @@ jobs:
 
       - name: Commit state
         run: |
+            set -euo pipefail
             git config user.name "figma-team-update-fairy"
             git config user.email "actions@users.noreply.github.com"
+        
             git add state/team_last_versions.json state/changes.json
+        
+            # 변경 없으면 종료
+            if git diff --cached --quiet; then
+              echo "No state changes to commit."
+              exit 0
+            fi
+        
             git commit -m "chore: update figma state" || exit 0
-            git push
+        
+            # 최신 main 반영 후 push (충돌/락 방지)
+            git pull --rebase origin main
+            git push origin HEAD:main
