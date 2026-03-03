@@ -79,6 +79,7 @@ jobs:
               page=1
 
               while [ -n "${url:-}" ] && [ "$page" -le "$MAX_PAGES" ]; do
+                echo "DEBUG url=[$url]"
                 versions=$(curl -sS -H "$auth_header" "$url")
 
                 # ✅ 라벨/설명 있는 버전만 + 아직 안 보낸 버전만
@@ -125,20 +126,28 @@ jobs:
                   mv "$tmp3" "$PENDING_FILE"
                 fi
 
-                # 다음 페이지로 이동 (없으면 종료)
+                # ✅ 다음 페이지(더 과거)로 이동 - next_page 포맷이 이상할 때 curl이 터지는 걸 방지
                 next=$(echo "$versions" | jq -r '.pagination.next_page // empty')
-                if [ -z "${next:-}" ]; then
-                  url=""
-                else
-                  # next_page가 상대경로(/v1/...)로 올 수도 있어서 보정
-                  if echo "$next" | grep -qE '^https?://'; then
+                next=$(printf '%s' "$next" | tr -d '\r\n')  # 혹시 모를 개행/CR 제거
+                
+                case "$next" in
+                  "")
+                    url=""
+                    ;;
+                  http://*|https://*)
                     url="$next"
-                  elif echo "$next" | grep -qE '^/'; then
+                    ;;
+                  /*)
                     url="https://api.figma.com$next"
-                  else
-                    url="$next"
-                  fi
-                fi
+                    ;;
+                  v1/*)
+                    url="https://api.figma.com/$next"
+                    ;;
+                  *)
+                    echo "⚠️ next_page 포맷이 예상과 다름: [$next] (페이지 이동 중단)"
+                    url=""
+                    ;;
+                esac
 
                 page=$((page + 1))
                 # API에 너무 빡세게 달려들지 말자(레이트리밋 완화)
