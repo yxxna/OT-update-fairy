@@ -10,7 +10,12 @@ permissions:
   
 concurrency:
   group: figma-update-fairy-state
-  cancel-in-progress: false
+  # cancel-in-progress: false
+  # ❌ 이유: false면 이전 실행이 끝날 때까지 다음 실행이 줄 서서 대기함(큐 적체).
+  #          5분마다 트리거가 와도 실제 실행은 20~40분 뒤에 시작하는 것처럼 보일 수 있음.
+  #          특히 API 호출/네트워크가 느린 날에는 backlog가 쌓여서 반응이 심하게 늦어짐.
+  cancel-in-progress: true
+  # ✅ 이유: 최신 실행만 유지하고, 밀린 실행은 취소해서 "최근 상태"를 빠르게 반영하게 함.
 
 jobs:
   scan-team-and-post:
@@ -19,10 +24,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install jq
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
+# - name: Install jq
+      #   # ❌ 이유: ubuntu-latest 러너에는 jq가 기본으로 있는 경우가 대부분이라 설치가 불필요함.
+      #   # ❌ 이유: apt-get update/install은 네트워크/미러 상태에 따라 몇 분~수십 분까지 지연될 수 있어
+      #   #          "5분마다" 실행의 체감 반응을 망치는 대표 원인이라 제거함.
+      #   # ❌ 이유: GitHub Actions schedule 자체도 지연될 수 있는데, 여기에 apt 지연까지 더하면 간격이 20~40분처럼 튐.
+      #   run: |
+      #     sudo apt-get update
+      #     sudo apt-get install -y jq
+
+      - name: Check jq  
+      # ✅ 이유: jq가 이미 설치돼 있는지 빠르게 확인만 해서 시간 낭비를 없앰.
+      # ✅ 이유: jq가 없으면 여기서 바로 실패하므로(원인 명확), 불필요한 느림 대신 빠른 피드백을 얻음.
+        run: jq --version
 
       - name: Scan team files for new versions
         env:
