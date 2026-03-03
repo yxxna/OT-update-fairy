@@ -54,6 +54,12 @@ jobs:
           #    라벨/설명 늦게 다는 경우를 잡으려면 MAX_PAGES를 늘리면 됨(대신 호출 증가).
           N=100
           MAX_PAGES=5   # 최근 500개 버전까지 재확인
+          # ✅ 오늘(KST) 00:00 ~ 내일(KST) 00:00 범위만 알림 대상으로 필터링
+          TODAY_KST=$(TZ=Asia/Seoul date +%F)
+          START_EPOCH=$(date -u -d "${TODAY_KST} 00:00:00 +0900" +%s)
+          END_EPOCH=$((START_EPOCH + 86400))
+          
+          echo "KST today=$TODAY_KST start_epoch=$START_EPOCH end_epoch=$END_EPOCH"
 
           projects_json=$(curl -sS -H "$auth_header" "https://api.figma.com/v1/teams/$FIGMA_TEAM_ID/projects")
           project_ids=$(echo "$projects_json" | jq -r '.projects[]?.id')
@@ -80,18 +86,28 @@ jobs:
 
               while [ -n "${url:-}" ] && [ "$page" -le "$MAX_PAGES" ]; do
                 echo "DEBUG url(before)=[$url]"
-
                 # ✅ 공백/특수문자 때문에 curl이 터지는 걸 막기 위해 URL 인코딩해서 curl에만 사용
                 curl_url=$(python3 -c 'import sys,urllib.parse as u; print(u.quote(sys.argv[1], safe=":/?&=%+"))' "$url")
-                
                 echo "DEBUG url(after)=[$curl_url]"
                 versions=$(curl -sS -H "$auth_header" "$curl_url")
 
                 # ✅ 라벨/설명 있는 버전만 + 아직 안 보낸 버전만
-                new_versions=$(echo "$versions" | jq -c --argjson notified "$notified" '
+                 new_versions=$(echo "$versions" | jq -c \
+                  --argjson notified "$notified" \
+                  --argjson start "$START_EPOCH" \
+                  --argjson end "$END_EPOCH" '
                   [ .versions[]?
+                    # ✅ label/description 있는 버전만
                     | select(((.label // "")|length > 0) or ((.description // "")|length > 0))
+                
+                    # ✅ 오늘(KST) 생성된 버전만 (created_at 기준)
+                    | select((.created_at // "") != "")
+                    | (.created_at | fromdateiso8601) as $ts
+                    | select($ts >= $start and $ts < $end)
+                
+                    # ✅ 아직 Slack으로 안 보낸 버전만
                     | select(($notified[.id] // false) | not)
+                
                     | {
                         id: .id,
                         label: (.label // ""),
@@ -101,7 +117,6 @@ jobs:
                       }
                   ]
                 ')
-
                 new_count=$(echo "$new_versions" | jq 'length')
 
                 if [ "$new_count" -gt 0 ]; then
@@ -170,41 +185,74 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           set -euo pipefail
+
           total=$(jq 'length' state/changes.json)
-
-          SHOW=10
-          head=$(jq -c --argjson n $SHOW '.[0:$n]' state/changes.json)
-          rest=$(( total - SHOW ))
-          if [ $rest -lt 0 ]; then rest=0; fi
-
-          lines=$(echo "$head" | jq -r '
-            .[] |
-            (
-              "  - 파일 : " + (.file_name // "-") + "\n" +
-              "  - 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
-              "  - 내용 : " +
-                (if ((.description // "")|length) > 0 then
-                   ("\n" + ((.description // "") | gsub("\r\n";"\n") | split("\n") | map("    " + .) | join("\n")))
-                 else
-                   "-"
-                 end) + "\n" +
-              "  - 작성자 : " + (.user // "-") + "\n" +
-              "  - 링크 : " + (.link // "-")
-            )
-          ')
-
-          if [ $rest -gt 0 ]; then
-            lines="$lines\n\n…외 ${rest}건 더 있음"
+          
+          # 오늘 변경이 0이면 그냥 조용히 종료
+          if [ "$total" -eq 0 ]; then
+            echo "No changes to post."
+            exit 0
           fi
+          
+          # ✅ 최신순 정렬(오늘 것만 changes.json에 들어있다는 전제)
+          sorted_tmp=$(mktemp)
+          jq 'sort_by(.created_at // "") | reverse' state/changes.json > "$sorted_tmp"
+          
+          # ✅ Slack 메시지 길이 제한 대비: 1개 메시지당 항목 수
+          PER_MSG=20
+          pages=$(( (total + PER_MSG - 1) / PER_MSG ))
+          
+          for p in $(seq 0 $((pages - 1))); do
+            start=$((p * PER_MSG))
+            end=$((start + PER_MSG))
+          
+            chunk=$(jq -c --argjson s "$start" --argjson e "$end" '.[$s:$e]' "$sorted_tmp")
+            chunk_count=$(echo "$chunk" | jq 'length')
+          
+            # 안전장치
+            if [ "$chunk_count" -eq 0 ]; then
+              continue
+            fi
+          
+            lines=$(echo "$chunk" | jq -r '
+              .[] |
+              (
+                "• 파일 : " + (.file_name // "-") + "\n" +
+                "  - 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
+                "  - 내용 : " +
+                  (
+                    if ((.description // "")|length) > 0 then
+                      (
+                        (.description // "")
+                        | gsub("\r\n";"\n")
+                        | split("\n")
+                        | map(select(length > 0))
+                        | .[0:3]
+                        | join(" / ")
+                        | (if length > 200 then .[0:200] + "…" else . end)
+                      )
+                    else
+                      "-"
+                    end
+                  ) + "\n" +
+                "  - 작성자 : " + (.user // "-") + "\n" +
+                "  - 링크 : " + (.link // "-")
+              )
+            ')
 
-          text="🧚‍♀️ *Figma 팀 업데이트 감지* (새 버전 ${total}건)
+  header="🧚‍♀️ *Figma 팀 업데이트 감지* (오늘 새 버전 ${total}건)  [$(($p + 1))/${pages}]"
+  text="${header}\n\n${lines}"
 
-          $lines"
+  # ✅ Slack 전송 (실패하면 워크플로우 실패로 처리)
+  curl -sS --fail-with-body -X POST -H 'Content-type: application/json' \
+    --data "$(jq -n --arg t "$text" '{text:$t}')" \
+    "$SLACK_WEBHOOK_URL"
 
-          # ✅ Slack 실패하면 여기서 실패 처리되게 (그래야 NOTIFIED 갱신 안 하고 다음에 재시도함)
-          curl -sS --fail-with-body -X POST -H 'Content-type: application/json' \
-            --data "$(jq -n --arg t "$text" '{text:$t}')" \
-            "$SLACK_WEBHOOK_URL"
+  # 너무 연달아 보내면 Slack이 삐질 수 있어서 약간 쉬기
+  sleep 0.2
+done
+
+rm -f "$sorted_tmp"
 
       - name: Mark versions as notified (after Slack success)
         if: ${{ env.changed_count != '0' }}
