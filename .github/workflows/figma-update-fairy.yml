@@ -2,7 +2,7 @@ name: Figma Update Fairy (Team)
 
 on:
   schedule:
-    - cron: "*/5 * * * *" # 5분마다
+    - cron: "*/10 * * * *" # 10분마다
   workflow_dispatch: {}
 
 permissions:
