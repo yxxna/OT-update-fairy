@@ -240,7 +240,7 @@ jobs:
               )
             ')
 
-            header="🧚‍♀️ *Figma 팀 업데이트 감지* (오늘 새 버전 ${total}건)  [$(($p + 1))/${pages}]"
+            header="🧚‍♀️ *Figma 팀 업데이트 감지* (오늘 새 버전 ${total}건)  [$((p + 1))/${pages}]"
             text="${header}\n\n${lines}"
           
             # ✅ Slack 전송 (실패하면 워크플로우 실패로 처리)
