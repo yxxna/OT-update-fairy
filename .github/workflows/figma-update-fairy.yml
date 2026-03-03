@@ -7,15 +7,12 @@ on:
 
 permissions:
   contents: write
-  
+
 concurrency:
   group: figma-update-fairy-state
-  # cancel-in-progress: false
-  # ❌ 이유: false면 이전 실행이 끝날 때까지 다음 실행이 줄 서서 대기함(큐 적체).
-  #          5분마다 트리거가 와도 실제 실행은 20~40분 뒤에 시작하는 것처럼 보일 수 있음.
-  #          특히 API 호출/네트워크가 느린 날에는 backlog가 쌓여서 반응이 심하게 늦어짐.
-  cancel-in-progress: true
-  # ✅ 이유: 최신 실행만 유지하고, 밀린 실행은 취소해서 "최근 상태"를 빠르게 반영하게 함.
+  cancel-in-progress: false
+  # ✅ 이유: "누락 없이"가 목표면, 실행 중간에 취소되면 Slack 실패/커밋 실패로 누락 위험이 커짐.
+  #          느려도 끝까지 가게 두는 게 안정적.
 
 jobs:
   scan-team-and-post:
@@ -24,21 +21,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-# - name: Install jq
-      #   # ❌ 이유: ubuntu-latest 러너에는 jq가 기본으로 있는 경우가 대부분이라 설치가 불필요함.
-      #   # ❌ 이유: apt-get update/install은 네트워크/미러 상태에 따라 몇 분~수십 분까지 지연될 수 있어
-      #   #          "5분마다" 실행의 체감 반응을 망치는 대표 원인이라 제거함.
-      #   # ❌ 이유: GitHub Actions schedule 자체도 지연될 수 있는데, 여기에 apt 지연까지 더하면 간격이 20~40분처럼 튐.
-      #   run: |
-      #     sudo apt-get update
-      #     sudo apt-get install -y jq
-
-      - name: Check jq  
-      # ✅ 이유: jq가 이미 설치돼 있는지 빠르게 확인만 해서 시간 낭비를 없앰.
-      # ✅ 이유: jq가 없으면 여기서 바로 실패하므로(원인 명확), 불필요한 느림 대신 빠른 피드백을 얻음.
+      - name: Check jq
         run: jq --version
 
-      - name: Scan team files for new versions
+      - name: Scan team files for labeled/desc versions (no-miss)
         env:
           FIGMA_TOKEN: ${{ secrets.FIGMA_TOKEN }}
           FIGMA_TEAM_ID: ${{ secrets.FIGMA_TEAM_ID }}
@@ -46,16 +32,28 @@ jobs:
           set -euo pipefail
 
           mkdir -p state
-          STATE_FILE="state/team_last_versions.json"
-          CHANGES_FILE="state/changes.json"
 
-          if [ ! -f "$STATE_FILE" ]; then
-            echo '{}' > "$STATE_FILE"
+          # ✅ "이미 Slack으로 보낸 version-id"만 저장 (누락 방지 핵심)
+          NOTIFIED_FILE="state/team_notified_versions.json"
+          if [ ! -f "$NOTIFIED_FILE" ]; then
+            echo '{}' > "$NOTIFIED_FILE"
           fi
+
+          # ✅ 이번 실행에서 새로 보낼 건들 (Slack 전송 성공 후에만 NOTIFIED에 합칠 거라서)
+          PENDING_FILE="state/pending_notified.json"
+          echo '{}' > "$PENDING_FILE"
+
+          # ✅ Slack 본문 생성용
+          CHANGES_FILE="state/changes.json"
           echo '[]' > "$CHANGES_FILE"
 
           auth_header="X-FIGMA-TOKEN: $FIGMA_TOKEN"
-          N=50
+
+          # ✅ 성능/정확도 트레이드오프
+          #    N * MAX_PAGES 만큼 "최근 버전"만 확인함.
+          #    라벨/설명 늦게 다는 경우를 잡으려면 MAX_PAGES를 늘리면 됨(대신 호출 증가).
+          N=100
+          MAX_PAGES=5   # 최근 500개 버전까지 재확인
 
           projects_json=$(curl -sS -H "$auth_header" "https://api.figma.com/v1/teams/$FIGMA_TEAM_ID/projects")
           project_ids=$(echo "$projects_json" | jq -r '.projects[]?.id')
@@ -72,72 +70,80 @@ jobs:
 
             for key in $keys; do
               name=$(echo "$files_json" | jq -r --arg k "$key" '.files[] | select(.key==$k) | .name')
+              link_base="https://www.figma.com/file/$key"
 
-              versions=$(curl -sS -H "$auth_header" "https://api.figma.com/v1/files/$key/versions?page_size=$N")
-              latest_id=$(echo "$versions" | jq -r '.versions[0].id // empty')
+              # 이 파일에서 이미 보낸 버전 id set
+              notified=$(jq -c --arg k "$key" '.[$k] // {}' "$NOTIFIED_FILE")
 
-              if [ -z "$latest_id" ]; then
-                continue
-              fi
+              url="https://api.figma.com/v1/files/$key/versions?page_size=$N"
+              page=1
 
-              prev_id=$(jq -r --arg k "$key" '.[$k] // ""' "$STATE_FILE")
+              while [ -n "${url:-}" ] && [ "$page" -le "$MAX_PAGES" ]; do
+                versions=$(curl -sS -H "$auth_header" "$url")
 
-              # 첫 실행/새 파일은 기준점만 저장 (도배 방지)
-              if [ -z "$prev_id" ]; then
-                tmp=$(mktemp)
-                jq --arg k "$key" --arg v "$latest_id" '. + {($k): $v}' "$STATE_FILE" > "$tmp"
-                mv "$tmp" "$STATE_FILE"
-                continue
-              fi
+                # ✅ 라벨/설명 있는 버전만 + 아직 안 보낸 버전만
+                new_versions=$(echo "$versions" | jq -c --argjson notified "$notified" '
+                  [ .versions[]?
+                    | select(((.label // "")|length > 0) or ((.description // "")|length > 0))
+                    | select(($notified[.id] // false) | not)
+                    | {
+                        id: .id,
+                        label: (.label // ""),
+                        description: (.description // ""),
+                        created_at: (.created_at // ""),
+                        user: (.user.handle // .user.email // "")
+                      }
+                  ]
+                ')
 
-              new_versions=$(echo "$versions" | jq -c --arg prev "$prev_id" '
-                reduce .versions[] as $v ({hit:false, out:[]};
-                  if .hit then .
-                  elif ($v.id == $prev) then .hit=true
+                new_count=$(echo "$new_versions" | jq 'length')
+
+                if [ "$new_count" -gt 0 ]; then
+                  # Slack에 보낼 리스트에 추가
+                  tmp2=$(mktemp)
+                  jq --arg file_name "$name" \
+                     --arg file_key "$key" \
+                     --arg link_base "$link_base" \
+                     --argjson nv "$new_versions" \
+                     '
+                     . + ( $nv | map(. + {
+                       file_name: $file_name,
+                       file_key: $file_key,
+                       link: ($link_base + "?version-id=" + .id)
+                     }))
+                     ' "$CHANGES_FILE" > "$tmp2"
+                  mv "$tmp2" "$CHANGES_FILE"
+
+                  # ✅ PENDING에만 기록 (Slack 성공 후 NOTIFIED에 합칠 거임)
+                  tmp3=$(mktemp)
+                  jq --arg k "$key" --argjson nv "$new_versions" '
+                    . as $root
+                    | ($root[$k] // {}) as $old
+                    | ($nv | reduce .[] as $v ($old; . + {($v.id): true})) as $merged
+                    | $root + {($k): $merged}
+                  ' "$PENDING_FILE" > "$tmp3"
+                  mv "$tmp3" "$PENDING_FILE"
+                fi
+
+                # 다음 페이지로 이동 (없으면 종료)
+                next=$(echo "$versions" | jq -r '.pagination.next_page // empty')
+                if [ -z "${next:-}" ]; then
+                  url=""
+                else
+                  # next_page가 상대경로(/v1/...)로 올 수도 있어서 보정
+                  if echo "$next" | grep -qE '^https?://'; then
+                    url="$next"
+                  elif echo "$next" | grep -qE '^/'; then
+                    url="https://api.figma.com$next"
                   else
-                    # ✅ label/description 있는 버전만 알림 대상으로 수집
-                    if ((($v.label // "")|length > 0) or (($v.description // "")|length > 0)) then
-                      .out += [{
-                        id: $v.id,
-                        label: ($v.label // ""),
-                        description: ($v.description // ""),
-                        created_at: ($v.created_at // ""),
-                        user: ($v.user.handle // $v.user.email // "")
-                      }]
-                    else
-                      .
-                    end
-                  end
-                ) | .out
-              ')
+                    url="$next"
+                  fi
+                fi
 
-              new_count=$(echo "$new_versions" | jq 'length')
-
-              # ✅ 최신 버전 id는 항상 저장 (알림 대상이 없어도 저장해야 반복 알림이 안 남)
-              if [ "$latest_id" != "$prev_id" ]; then
-                tmp=$(mktemp)
-                jq --arg k "$key" --arg v "$latest_id" '. + {($k): $v}' "$STATE_FILE" > "$tmp"
-                mv "$tmp" "$STATE_FILE"
-              fi
-              
-              # ✅ 알림은 "라벨/내용 있는 버전"이 있을 때만 changes에 추가
-              if [ "$new_count" -gt 0 ]; then
-                link_base="https://www.figma.com/file/$key"
-              
-                tmp2=$(mktemp)
-                jq --arg file_name "$name" \
-                   --arg file_key "$key" \
-                   --arg link_base "$link_base" \
-                   --argjson nv "$new_versions" \
-                   '
-                   . + ( $nv | map(. + {
-                     file_name: $file_name,
-                     file_key: $file_key,
-                     link: ($link_base + "?version-id=" + .id)
-                   }))
-                   ' "$CHANGES_FILE" > "$tmp2"
-                mv "$tmp2" "$CHANGES_FILE"
-              fi
+                page=$((page + 1))
+                # API에 너무 빡세게 달려들지 말자(레이트리밋 완화)
+                sleep 0.1
+              done
             done
           done
 
@@ -149,59 +155,79 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-            set -euo pipefail
-            total=$(jq 'length' state/changes.json)
-            
-            # 너무 길면 Slack이 보기 싫어하니까 상위 10개까지만 보여줌
-            SHOW=10
-            head=$(jq -c --argjson n $SHOW '.[0:$n]' state/changes.json)
-            rest=$(( total - SHOW ))
-            if [ $rest -lt 0 ]; then rest=0; fi
-            
-            lines=$(echo "$head" | jq -r '
-              .[] |
-              (
-                "  - 파일 : " + (.file_name // "-") + "\n" +
-                "  - 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
-                "  - 내용 : " +
-                  (if ((.description // "")|length) > 0 then
-                     ("\n" + ((.description // "") | gsub("\r\n";"\n") | split("\n") | map("    " + .) | join("\n")))
-                   else
-                     "-"
-                   end) + "\n" +
-                "  - 작성자 : " + (.user // "-") + "\n" +
-                "  - 링크 : " + (.link // "-")
-              )
-            ')
-            
-            if [ $rest -gt 0 ]; then
-              lines="$lines\n\n…외 ${rest}건 더 있음"
-            fi
-            
-            text="🧚‍♀️ *Figma 팀 업데이트 감지* (새 버전 ${total}건)
-            
-            $lines"
-            
-            curl -sS -X POST -H 'Content-type: application/json' \
-              --data "$(jq -n --arg t "$text" '{text:$t}')" \
-              "$SLACK_WEBHOOK_URL"
+          set -euo pipefail
+          total=$(jq 'length' state/changes.json)
+
+          SHOW=10
+          head=$(jq -c --argjson n $SHOW '.[0:$n]' state/changes.json)
+          rest=$(( total - SHOW ))
+          if [ $rest -lt 0 ]; then rest=0; fi
+
+          lines=$(echo "$head" | jq -r '
+            .[] |
+            (
+              "  - 파일 : " + (.file_name // "-") + "\n" +
+              "  - 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
+              "  - 내용 : " +
+                (if ((.description // "")|length) > 0 then
+                   ("\n" + ((.description // "") | gsub("\r\n";"\n") | split("\n") | map("    " + .) | join("\n")))
+                 else
+                   "-"
+                 end) + "\n" +
+              "  - 작성자 : " + (.user // "-") + "\n" +
+              "  - 링크 : " + (.link // "-")
+            )
+          ')
+
+          if [ $rest -gt 0 ]; then
+            lines="$lines\n\n…외 ${rest}건 더 있음"
+          fi
+
+          text="🧚‍♀️ *Figma 팀 업데이트 감지* (새 버전 ${total}건)
+
+          $lines"
+
+          # ✅ Slack 실패하면 여기서 실패 처리되게 (그래야 NOTIFIED 갱신 안 하고 다음에 재시도함)
+          curl -sS --fail-with-body -X POST -H 'Content-type: application/json' \
+            --data "$(jq -n --arg t "$text" '{text:$t}')" \
+            "$SLACK_WEBHOOK_URL"
+
+      - name: Mark versions as notified (after Slack success)
+        if: ${{ env.changed_count != '0' }}
+        run: |
+          set -euo pipefail
+          NOTIFIED_FILE="state/team_notified_versions.json"
+          PENDING_FILE="state/pending_notified.json"
+
+          tmp=$(mktemp)
+          jq --slurp '
+            .[0] as $n | .[1] as $p |
+            reduce ($p|to_entries[]) as $e ($n;
+              . + { ($e.key): ((.[ $e.key ] // {}) + ($e.value // {})) }
+            )
+          ' "$NOTIFIED_FILE" "$PENDING_FILE" > "$tmp"
+          mv "$tmp" "$NOTIFIED_FILE"
+
+          # repo에 남길 필요 없음
+          rm -f "$PENDING_FILE"
+
+          # changes.json도 굳이 커밋에 남기고 싶지 않으면 초기화
+          echo '[]' > state/changes.json
 
       - name: Commit state
         run: |
-            set -euo pipefail
-            git config user.name "figma-team-update-fairy"
-            git config user.email "actions@users.noreply.github.com"
-        
-            git add state/team_last_versions.json state/changes.json
-        
-            # 변경 없으면 종료
-            if git diff --cached --quiet; then
-              echo "No state changes to commit."
-              exit 0
-            fi
-        
-            git commit -m "chore: update figma state" || exit 0
-        
-            # 최신 main 반영 후 push (충돌/락 방지)
-            git pull --rebase origin main
-            git push origin HEAD:main
+          set -euo pipefail
+          git config user.name "figma-team-update-fairy"
+          git config user.email "actions@users.noreply.github.com"
+
+          git add state/team_notified_versions.json state/changes.json
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update figma notified state" || exit 0
+
+          git pull --rebase origin main
+          git push origin HEAD:main
