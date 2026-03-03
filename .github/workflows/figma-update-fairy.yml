@@ -55,9 +55,9 @@ jobs:
           N=100
           MAX_PAGES=5   # 최근 500개 버전까지 재확인
           # ✅ 오늘(KST) 00:00 ~ 내일(KST) 00:00 범위만 알림 대상으로 필터링
-          TODAY_KST=$(TZ=Asia/Seoul date +%F)
-          START_EPOCH=$(date -u -d "${TODAY_KST} 00:00:00 +0900" +%s)
-          END_EPOCH=$((START_EPOCH + 86400))
+          # TODAY_KST=$(TZ=Asia/Seoul date +%F)
+          # START_EPOCH=$(date -u -d "${TODAY_KST} 00:00:00 +0900" +%s)
+          # END_EPOCH=$((START_EPOCH + 86400))
           
           echo "KST today=$TODAY_KST start_epoch=$START_EPOCH end_epoch=$END_EPOCH"
 
@@ -93,17 +93,10 @@ jobs:
 
                 # ✅ 라벨/설명 있는 버전만 + 아직 안 보낸 버전만
                  new_versions=$(echo "$versions" | jq -c \
-                  --argjson notified "$notified" \
-                  --argjson start "$START_EPOCH" \
-                  --argjson end "$END_EPOCH" '
+                  --argjson notified "$notified" '
                   [ .versions[]?
                     # ✅ label/description 있는 버전만
                     | select(((.label // "")|length > 0) or ((.description // "")|length > 0))
-                
-                    # ✅ 오늘(KST) 생성된 버전만 (created_at 기준)
-                    | select((.created_at // "") != "")
-                    | (.created_at | fromdateiso8601) as $ts
-                    | select($ts >= $start and $ts < $end)
                 
                     # ✅ 아직 Slack으로 안 보낸 버전만
                     | select(($notified[.id] // false) | not)
