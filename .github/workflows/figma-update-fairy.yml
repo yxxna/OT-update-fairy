@@ -79,8 +79,13 @@ jobs:
               page=1
 
               while [ -n "${url:-}" ] && [ "$page" -le "$MAX_PAGES" ]; do
-                echo "DEBUG url=[$url]"
-                versions=$(curl -sS -H "$auth_header" "$url")
+                echo "DEBUG url(before)=[$url]"
+
+                # ✅ 공백/특수문자 때문에 curl이 터지는 걸 막기 위해 URL 인코딩해서 curl에만 사용
+                curl_url=$(python3 -c 'import sys,urllib.parse as u; print(u.quote(sys.argv[1], safe=":/?&=%+"))' "$url")
+                
+                echo "DEBUG url(after)=[$curl_url]"
+                versions=$(curl -sS -H "$auth_header" "$curl_url")
 
                 # ✅ 라벨/설명 있는 버전만 + 아직 안 보낸 버전만
                 new_versions=$(echo "$versions" | jq -c --argjson notified "$notified" '
