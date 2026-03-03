@@ -59,7 +59,7 @@ jobs:
           # START_EPOCH=$(date -u -d "${TODAY_KST} 00:00:00 +0900" +%s)
           # END_EPOCH=$((START_EPOCH + 86400))
           
-          echo "KST today=$TODAY_KST start_epoch=$START_EPOCH end_epoch=$END_EPOCH"
+          # echo "KST today=$TODAY_KST start_epoch=$START_EPOCH end_epoch=$END_EPOCH"
 
           projects_json=$(curl -sS -H "$auth_header" "https://api.figma.com/v1/teams/$FIGMA_TEAM_ID/projects")
           project_ids=$(echo "$projects_json" | jq -r '.projects[]?.id')
