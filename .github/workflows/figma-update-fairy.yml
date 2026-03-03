@@ -240,19 +240,19 @@ jobs:
               )
             ')
 
-  header="🧚‍♀️ *Figma 팀 업데이트 감지* (오늘 새 버전 ${total}건)  [$(($p + 1))/${pages}]"
-  text="${header}\n\n${lines}"
-
-  # ✅ Slack 전송 (실패하면 워크플로우 실패로 처리)
-  curl -sS --fail-with-body -X POST -H 'Content-type: application/json' \
-    --data "$(jq -n --arg t "$text" '{text:$t}')" \
-    "$SLACK_WEBHOOK_URL"
-
-  # 너무 연달아 보내면 Slack이 삐질 수 있어서 약간 쉬기
-  sleep 0.2
-done
-
-rm -f "$sorted_tmp"
+            header="🧚‍♀️ *Figma 팀 업데이트 감지* (오늘 새 버전 ${total}건)  [$(($p + 1))/${pages}]"
+            text="${header}\n\n${lines}"
+          
+            # ✅ Slack 전송 (실패하면 워크플로우 실패로 처리)
+            curl -sS --fail-with-body -X POST -H 'Content-type: application/json' \
+              --data "$(jq -n --arg t "$text" '{text:$t}')" \
+              "$SLACK_WEBHOOK_URL"
+          
+            # 너무 연달아 보내면 Slack이 삐질 수 있어서 약간 쉬기
+            sleep 0.2
+          done
+          
+          rm -f "$sorted_tmp"
 
       - name: Mark versions as notified (after Slack success)
         if: ${{ env.changed_count != '0' }}
