@@ -218,8 +218,19 @@ jobs:
               .[] |
               (
                 "• 파일 : " + (.file_name // "-") + "\n" +
-                "  - 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
-                "  - 내용 : " +
+                "• 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
+                "• 수정시각 : " +
+                  (  
+                    if ((.created_at // "") | length) > 0 then
+                      (
+                        ((.created_at | fromdateiso8601) + 32400)
+                        | strftime("%Y-%m-%d %H:%M:%S")
+                      ) + " KST"
+                    else
+                      "-"
+                    end
+                  ) + "\n" +
+                "• 내용 : " +
                   (
                     if ((.description // "")|length) > 0 then
                       (
@@ -235,8 +246,8 @@ jobs:
                       "-"
                     end
                   ) + "\n" +
-                "  - 작성자 : " + (.user // "-") + "\n" +
-                "  - 링크 : " + (.link // "-")
+                "• 작성자 : " + (.user // "-") + "\n" +
+                "• 링크 : " + (.link // "-")
               )
             ')
 
