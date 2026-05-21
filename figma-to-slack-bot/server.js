@@ -66,8 +66,14 @@ app.post("/figma/webhook", async (req, res) => {
       "someone";
     
     const versionLabel = (req.body?.label || "").trim();
-    const versionDesc  = (req.body?.description || "").trim();  
+    const versionDesc  = (req.body?.description || "").trim();
 
+    const SKIP_KEYWORDS = ["components published", "ready for dev"];
+    const haystack = `${versionLabel} ${versionDesc}`.toLowerCase();
+    if (SKIP_KEYWORDS.some((kw) => haystack.includes(kw))) {
+      console.log("skip by keyword:", versionLabel || versionDesc);
+      return;
+    }
 
     const figmaFileUrl = fileKey ? `https://www.figma.com/file/${fileKey}` : "https://www.figma.com/";
 
@@ -77,7 +83,7 @@ app.post("/figma/webhook", async (req, res) => {
       `📌 *Figma 버전 업데이트* 📌\n` +
       `• 파일: ${fileName}\n` +
       (versionLabel ? `• 버전: ${versionLabel}\n` : "") +
-      (versionDesc ? `• 변경점: ${versionDesc}\n` : "") +
+      (versionDesc ? `• 변경점:\n${versionDesc}\n` : "") +
       `• 작성자: ${triggeredBy}\n` +
       `• 링크: ${figmaFileUrl}`;
 
