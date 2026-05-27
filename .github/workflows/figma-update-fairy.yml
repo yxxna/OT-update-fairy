@@ -2,7 +2,7 @@ name: Figma Update Fairy (Team)
 
 on:
   schedule:
-    - cron: "*/10 * * * *" # 10분마다
+    - cron: "*/5 * * * *" # 5분마다 (GitHub Actions cron 최소 간격)
   workflow_dispatch:
 
 permissions:
@@ -50,11 +50,11 @@ jobs:
 
           auth_header="X-FIGMA-TOKEN: $FIGMA_TOKEN"
 
-          # ✅ 성능/정확도 트레이드오프
-          #    N * MAX_PAGES 만큼 "최근 버전"만 확인함.
-          #    라벨/설명 늦게 다는 경우를 잡으려면 MAX_PAGES를 늘리면 됨(대신 호출 증가).
+          # ✅ 이 cron이 유일한 알림 경로. 5분마다 "오늘(KST) 생성된 새 버전"만 보면 되므로
+          #    최근 몇 페이지만 확인하면 충분함.
+          #    ("라벨 나중에 달기" 지원은 제거했으므로 깊게 재스캔할 필요 없음)
           N=100
-          MAX_PAGES=5   # 최근 500개 버전까지 재확인
+          MAX_PAGES=2   # 최근 200개 버전까지만 확인 (당일 신규는 충분히 커버)
           # ✅ 오늘(KST) 00:00 ~ 내일(KST) 00:00 범위만 알림 대상으로 필터링
           TODAY_KST=$(TZ=Asia/Seoul date +%F)
           START_EPOCH=$(date -u -d "${TODAY_KST} 00:00:00 +0900" +%s)
@@ -187,83 +187,65 @@ jobs:
           set -euo pipefail
 
           total=$(jq 'length' state/changes.json)
-          
+
           # 오늘 변경이 0이면 그냥 조용히 종료
           if [ "$total" -eq 0 ]; then
             echo "No changes to post."
             exit 0
           fi
-          
-          # ✅ 최신순 정렬(오늘 것만 changes.json에 들어있다는 전제)
-          sorted_tmp=$(mktemp)
-          jq 'sort_by(.created_at // "") | reverse' state/changes.json > "$sorted_tmp"
-          
-          # ✅ Slack 메시지 길이 제한 대비: 1개 메시지당 항목 수
-          PER_MSG=20
-          pages=$(( (total + PER_MSG - 1) / PER_MSG ))
-          
-          for p in $(seq 0 $((pages - 1))); do
-            start=$((p * PER_MSG))
-            end=$((start + PER_MSG))
-          
-            chunk=$(jq -c --argjson s "$start" --argjson e "$end" '.[$s:$e]' "$sorted_tmp")
-            chunk_count=$(echo "$chunk" | jq 'length')
-          
-            # 안전장치
-            if [ "$chunk_count" -eq 0 ]; then
-              continue
-            fi
-          
-            lines=$(echo "$chunk" | jq -r '
-              .[] |
-              (
-                "• 파일 : " + (.file_name // "-") + "\n" +
-                "• 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
-                "• 수정시각 : " +
-                  (  
-                    if ((.created_at // "") | length) > 0 then
-                      (
-                        ((.created_at | fromdateiso8601) + 32400)
-                        | strftime("%Y-%m-%d %H:%M:%S")
-                      ) + " KST"
-                    else
-                      "-"
-                    end
-                  ) + "\n" +
-                "• 내용 : " +
-                  (
-                    if ((.description // "")|length) > 0 then
-                      (
-                        (.description // "")
-                        | gsub("\r\n";"\n")
-                        | split("\n")
-                        | map(select(length > 0))
-                        | .[0:3]
-                        | join(" / ")
-                        | (if length > 200 then .[0:200] + "…" else . end)
-                      )
-                    else
-                      "-"
-                    end
-                  ) + "\n" +
-                "• 작성자 : " + (.user // "-") + "\n" +
-                "• 링크 : " + (.link // "-")
-              )
-            ')
 
-            TODAY_KST=$(TZ=Asia/Seoul date +%F)
-            header="🧚‍♀️ *Figma 팀 업데이트 감지* (${TODAY_KST} KST / 새 버전 ${total}건)  [$((p + 1))/${pages}]"
-            text=$(printf "%s\n\n%s" "$header" "$lines")
-          
-            # ✅ Slack 전송 (실패하면 워크플로우 실패로 처리)
+          # ✅ 오래된 것부터(시간순) 정렬 → 채널에 발생 순서대로 보이게
+          sorted_tmp=$(mktemp)
+          jq 'sort_by(.created_at // "")' state/changes.json > "$sorted_tmp"
+          count=$(jq 'length' "$sorted_tmp")
+
+          # ✅ 묶음 전송 대신 1건씩 전송 (여러 개가 한꺼번에 오지 않도록)
+          for i in $(seq 0 $((count - 1))); do
+            text=$(jq -r --argjson i "$i" '
+              .[$i] |
+              "🧚‍♀️ *Figma 업데이트 감지*\n\n" +
+              "• 파일 : " + (.file_name // "-") + "\n" +
+              "• 버전 : " + (if ((.label // "")|length) > 0 then .label else "-" end) + "\n" +
+              "• 수정시각 : " +
+                (
+                  if ((.created_at // "") | length) > 0 then
+                    (
+                      ((.created_at | fromdateiso8601) + 32400)
+                      | strftime("%Y-%m-%d %H:%M:%S")
+                    ) + " KST"
+                  else
+                    "-"
+                  end
+                ) + "\n" +
+              "• 내용 : " +
+                (
+                  if ((.description // "")|length) > 0 then
+                    (
+                      (.description // "")
+                      | gsub("\r\n";"\n")
+                      | split("\n")
+                      | map(select(length > 0))
+                      | .[0:3]
+                      | join(" / ")
+                      | (if length > 200 then .[0:200] + "…" else . end)
+                    )
+                  else
+                    "-"
+                  end
+                ) + "\n" +
+              "• 작성자 : " + (.user // "-") + "\n" +
+              "• 링크 : " + (.link // "-")
+            ' "$sorted_tmp")
+
+            # ✅ Slack 전송 (실패하면 워크플로우 실패로 처리 → notified에 기록 안 됨)
             curl -sS --fail-with-body -X POST -H 'Content-type: application/json' \
               --data "$(jq -n --arg t "$text" '{text:$t}')" \
               "$SLACK_WEBHOOK_URL"
-          
+
             # 너무 연달아 보내면 Slack이 삐질 수 있어서 약간 쉬기
-            sleep 0.2
+            sleep 0.3
           done
-          
+
           rm -f "$sorted_tmp"
 
       - name: Mark versions as notified (after Slack success)
